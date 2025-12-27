@@ -1,0 +1,7 @@
+{
+  "name": "Aura Library",
+  "description": "A sophisticated AI-powered PDF library where you can upload ebooks, get instant AI summaries, perform deep research with Google Search grounding, and edit document visuals using Gemini 2.5 Flash Image.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
