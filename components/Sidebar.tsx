@@ -12,9 +12,9 @@ const Sidebar: React.FC<SidebarProps> = ({ onHome, onUpload, activeId }) => {
     <div className="w-20 md:w-64 bg-white border-r border-slate-100 flex flex-col items-center md:items-stretch py-8 transition-all">
       <div className="px-4 mb-10 flex items-center space-x-3">
         <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-indigo-200">
-          A
+          K
         </div>
-        <span className="hidden md:block text-xl font-serif font-bold tracking-tight">Aura Library</span>
+        <span className="hidden md:block text-xl font-serif font-bold tracking-tight">Kskar Library</span>
       </div>
 
       <nav className="flex-1 px-4 space-y-4 w-full">
@@ -42,7 +42,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onHome, onUpload, activeId }) => {
       </nav>
 
       <div className="px-4 mt-auto">
-        {/* Premium section removed per user request */}
       </div>
     </div>
   );

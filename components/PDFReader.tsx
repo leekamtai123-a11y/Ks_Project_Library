@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Book, Annotation, GroundingSource, AnnotationType } from '../types';
+import { Book, Annotation, GroundingSource, AnnotationType, Point } from '../types';
 import { researchTopic, editBookCover } from '../services/geminiService';
 import * as pdfjsLib from 'pdfjs-dist';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
@@ -23,9 +23,14 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
   const [activeTool, setActiveTool] = useState<AnnotationType>('highlight');
   const [isExporting, setIsExporting] = useState(false);
   
+  // Drawing state
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [currentPath, setCurrentPath] = useState<Point[]>([]);
+  
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const pdfRef = useRef<any>(null);
+  const renderTaskRef = useRef<any>(null);
 
   useEffect(() => {
     const loadPdf = async () => {
@@ -40,6 +45,12 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
       }
     };
     loadPdf();
+
+    return () => {
+      if (renderTaskRef.current) {
+        renderTaskRef.current.cancel();
+      }
+    };
   }, [book.dataUrl]);
 
   useEffect(() => {
@@ -50,6 +61,12 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
 
   const renderPage = async (pageNumber: number, currentScale: number) => {
     if (!pdfRef.current || !canvasRef.current || !textLayerRef.current) return;
+
+    if (renderTaskRef.current) {
+      renderTaskRef.current.cancel();
+      renderTaskRef.current = null;
+    }
+
     try {
       const page = await pdfRef.current.getPage(pageNumber);
       const viewport = page.getViewport({ scale: currentScale });
@@ -60,19 +77,27 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
       canvas.width = viewport.width;
 
       if (context) {
-        // Add canvas to RenderParameters as required by newer versions of pdfjs-dist
-        await (page as any).render({ canvasContext: context, viewport, canvas }).promise;
+        const renderContext = {
+          canvasContext: context,
+          viewport: viewport,
+          canvas: canvas
+        };
+        
+        const renderTask = page.render(renderContext);
+        renderTaskRef.current = renderTask;
+        
+        await renderTask.promise;
+        renderTaskRef.current = null;
+        
         drawPageAnnotations(context, viewport, pageNumber);
       }
 
-      // Render Text Layer for selection using modern TextLayer class
       const textLayerDiv = textLayerRef.current;
       textLayerDiv.innerHTML = '';
       textLayerDiv.style.width = `${viewport.width}px`;
       textLayerDiv.style.height = `${viewport.height}px`;
 
       const textContent = await page.getTextContent();
-      // Using the TextLayer class as renderTextLayer function is deprecated/removed in v4+
       const textLayer = new (pdfjsLib as any).TextLayer({
         textContentSource: textContent,
         container: textLayerDiv,
@@ -80,7 +105,8 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
       });
       await textLayer.render();
 
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === 'RenderingCancelledException') return;
       console.error("Error rendering page:", err);
     }
   };
@@ -94,6 +120,19 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
         ctx.fillStyle = 'rgba(254, 240, 138, 0.5)';
         ctx.fillRect(ann.rect.x * viewport.scale, ann.rect.y * viewport.scale, ann.rect.width * viewport.scale, ann.rect.height * viewport.scale);
         ctx.restore();
+      } else if (ann.type === 'draw' && ann.path) {
+        ctx.save();
+        ctx.strokeStyle = ann.color;
+        ctx.lineWidth = 2 * viewport.scale;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ann.path.forEach((pt, i) => {
+          if (i === 0) ctx.moveTo(pt.x * viewport.scale, pt.y * viewport.scale);
+          else ctx.lineTo(pt.x * viewport.scale, pt.y * viewport.scale);
+        });
+        ctx.stroke();
+        ctx.restore();
       }
     });
   };
@@ -102,7 +141,63 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
     renderPage(currentPage, scale);
   }, [currentPage, scale, book.annotations]);
 
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (activeTool !== 'draw') return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / scale;
+    const y = (e.clientY - rect.top) / scale;
+    
+    setIsDrawing(true);
+    setCurrentPath([{ x, y }]);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!isDrawing || activeTool !== 'draw') return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / scale;
+    const y = (e.clientY - rect.top) / scale;
+
+    setCurrentPath(prev => [...prev, { x, y }]);
+
+    // Temporary draw on canvas for smooth feedback
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 2 * scale;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      const lastPt = currentPath[currentPath.length - 1];
+      ctx.moveTo(lastPt.x * scale, lastPt.y * scale);
+      ctx.lineTo(x * scale, y * scale);
+      ctx.stroke();
+    }
+  };
+
+  const handleMouseUp = () => {
+    if (isDrawing && currentPath.length > 1) {
+      const newAnnotation: Annotation = {
+        id: Math.random().toString(36).substr(2, 9),
+        type: 'draw',
+        pageNumber: currentPage,
+        color: '#ef4444',
+        timestamp: Date.now(),
+        path: currentPath
+      };
+      onUpdateBook({ ...book, annotations: [...book.annotations, newAnnotation] });
+    }
+    setIsDrawing(false);
+    setCurrentPath([]);
+  };
+
   const handleTextSelection = () => {
+    if (activeTool === 'draw') return;
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
 
@@ -114,7 +209,6 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
     const canvasRect = canvasRef.current?.getBoundingClientRect();
 
     if (canvasRect) {
-      // Scale is applied to canvas dimensions, so we normalize the rect back to scale 1.0 for storage
       const relX = (rect.left - canvasRect.left) / scale;
       const relY = (rect.top - canvasRect.top) / scale;
       const relW = rect.width / scale;
@@ -190,9 +284,8 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
         if (ann.pageNumber <= pages.length) {
           const page = pages[ann.pageNumber - 1];
           const { width, height } = page.getSize();
+          
           if (ann.type === 'highlight' && ann.rect) {
-            // Mapping relative normalized coordinates back to PDF dimensions
-            // PDF-lib is bottom-up coordinate system
             const pdfX = ann.rect.x * (width / (canvasRef.current!.width / scale));
             const pdfY = height - (ann.rect.y + ann.rect.height) * (height / (canvasRef.current!.height / scale));
             const pdfW = ann.rect.width * (width / (canvasRef.current!.width / scale));
@@ -206,18 +299,35 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
               color: rgb(1, 1, 0),
               opacity: 0.3,
             });
+          } else if (ann.type === 'draw' && ann.path) {
+            // Mapping path points to PDF space
+            const pdfPoints = ann.path.map(pt => ({
+              x: pt.x * (width / (canvasRef.current!.width / scale)),
+              y: height - pt.y * (height / (canvasRef.current!.height / scale))
+            }));
+            
+            for (let i = 0; i < pdfPoints.length - 1; i++) {
+              page.drawLine({
+                start: pdfPoints[i],
+                end: pdfPoints[i+1],
+                thickness: 2,
+                color: rgb(0.9, 0.2, 0.2),
+                opacity: 0.8
+              });
+            }
           }
         }
       });
 
       const summaryPage = pdfDoc.addPage();
-      summaryPage.drawText('Study Notes Summary', { x: 50, y: summaryPage.getHeight() - 50, size: 24, font });
+      summaryPage.drawText('Kskar Library Study Notes', { x: 50, y: summaryPage.getHeight() - 50, size: 24, font });
       let yOffset = summaryPage.getHeight() - 100;
       book.annotations.forEach((ann, i) => {
-        if (ann.text) {
-          summaryPage.drawText(`${i+1}. [Page ${ann.pageNumber}] ${ann.text.substring(0, 80)}`, { x: 50, y: yOffset, size: 10 });
+        if (ann.text || ann.type === 'draw') {
+          const content = ann.text ? ann.text.substring(0, 80) : "Drawing / Sketch";
+          summaryPage.drawText(`${i+1}. [Page ${ann.pageNumber}] ${content}`, { x: 50, y: yOffset, size: 10 });
           yOffset -= 20;
-          if (yOffset < 50) return; // Basic page limit check
+          if (yOffset < 50) return;
         }
       });
 
@@ -225,7 +335,7 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
       const blob = new Blob([pdfBytes], { type: 'application/pdf' });
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
-      link.download = `${book.metadata.name}_Annotated.pdf`;
+      link.download = `${book.metadata.name}_Kskar_Annotated.pdf`;
       link.click();
     } catch (err) {
       console.error("Export failed", err);
@@ -235,15 +345,15 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
   };
 
   return (
-    <div className="flex flex-col h-full bg-slate-50 animate-in slide-in-from-right duration-500">
+    <div className={`flex flex-col h-full bg-slate-50 animate-in slide-in-from-right duration-500 ${activeTool === 'draw' ? 'drawing-active' : ''}`}>
       <div className="h-16 flex items-center justify-between px-6 bg-white border-b border-slate-100 shrink-0">
         <div className="flex items-center space-x-4">
           <button onClick={onClose} className="p-2 hover:bg-slate-50 rounded-lg text-slate-500 transition-colors">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
           </button>
           <div className="hidden sm:block">
-            <h2 className="font-bold text-slate-900 leading-none">{book.metadata.name}</h2>
-            <p className="text-xs text-slate-400 mt-1">Reading progress: {Math.round((currentPage/numPages!)*100)}%</p>
+            <h2 className="font-bold text-slate-900 leading-none truncate max-w-[200px]">{book.metadata.name}</h2>
+            <p className="text-xs text-slate-400 mt-1">Kskar Reader Progress: {Math.round((currentPage/numPages!)*100)}%</p>
           </div>
         </div>
 
@@ -252,12 +362,21 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
             <button 
               onClick={() => setActiveTool('highlight')}
               className={`p-2 rounded-lg transition-all ${activeTool === 'highlight' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
+              title="Highlight Tool"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+            </button>
+            <button 
+              onClick={() => setActiveTool('draw')}
+              className={`p-2 rounded-lg transition-all ${activeTool === 'draw' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
+              title="Freehand Drawing"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
             </button>
             <button 
               onClick={() => setActiveTool('note')}
               className={`p-2 rounded-lg transition-all ${activeTool === 'note' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
+              title="Note Tool"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path></svg>
             </button>
@@ -319,9 +438,9 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
           <div className="p-6">
             <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">Annotations</h3>
             <div className="space-y-4">
-              {book.annotations.length === 0 ? <p className="text-[11px] text-slate-400 text-center py-10">Select text in PDF to add highlights.</p> : book.annotations.slice().reverse().map(ann => (
-                <div key={ann.id} className={`p-3 rounded-xl border group relative cursor-pointer ${ann.type === 'highlight' ? 'bg-yellow-50 border-yellow-100' : 'bg-emerald-50 border-emerald-100'}`} onClick={() => setCurrentPage(ann.pageNumber)}>
-                  <p className="text-[11px] line-clamp-2">{ann.text}</p>
+              {book.annotations.length === 0 ? <p className="text-[11px] text-slate-400 text-center py-10">Select text in PDF or use the pencil to draw.</p> : book.annotations.slice().reverse().map(ann => (
+                <div key={ann.id} className={`p-3 rounded-xl border group relative cursor-pointer ${ann.type === 'highlight' ? 'bg-yellow-50 border-yellow-100' : ann.type === 'draw' ? 'bg-red-50 border-red-100' : 'bg-emerald-50 border-emerald-100'}`} onClick={() => setCurrentPage(ann.pageNumber)}>
+                  <p className="text-[11px] line-clamp-2">{ann.text || (ann.type === 'draw' ? "Sketch" : "")}</p>
                   <div className="mt-2 flex items-center justify-between text-[9px] opacity-60">
                     <span>Page {ann.pageNumber}</span>
                     <button onClick={(e) => { e.stopPropagation(); onUpdateBook({ ...book, annotations: book.annotations.filter(a => a.id !== ann.id) }); }} className="opacity-0 group-hover:opacity-100 text-red-500 transition-opacity">Delete</button>
@@ -332,11 +451,22 @@ const PDFReader: React.FC<PDFReaderProps> = ({ book, onClose, onUpdateBook }) =>
           </div>
         </div>
 
-        <div className="flex-1 flex flex-col items-center bg-slate-200/50 p-4 md:p-8 overflow-y-auto relative" onMouseUp={handleTextSelection}>
+        <div 
+          className="flex-1 flex flex-col items-center bg-slate-200/50 p-4 md:p-8 overflow-y-auto relative" 
+          onMouseUp={handleMouseUp}
+        >
           <div className="bg-white shadow-2xl rounded-sm mb-20 relative">
-            <canvas ref={canvasRef} className="max-w-full h-auto cursor-text block" />
-            {/* The Text Layer div placed on top of the canvas */}
-            <div ref={textLayerRef} className="textLayer absolute inset-0 overflow-hidden pointer-events-auto" />
+            <canvas 
+              ref={canvasRef} 
+              className="max-w-full h-auto cursor-text block" 
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+            />
+            <div 
+              ref={textLayerRef} 
+              className="textLayer absolute inset-0 overflow-hidden pointer-events-auto" 
+              onMouseUp={handleTextSelection}
+            />
           </div>
 
           <div className="fixed bottom-10 left-1/2 -translate-x-1/2 bg-slate-900/90 backdrop-blur-md text-white px-6 py-4 rounded-3xl flex items-center space-x-8 shadow-2xl border border-white/10 z-20">

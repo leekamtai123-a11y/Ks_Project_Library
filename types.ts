@@ -6,7 +6,12 @@ export interface BookMetadata {
   summary: string;
 }
 
-export type AnnotationType = 'highlight' | 'note' | 'shape';
+export type AnnotationType = 'highlight' | 'note' | 'shape' | 'draw';
+
+export interface Point {
+  x: number;
+  y: number;
+}
 
 export interface Annotation {
   id: string;
@@ -16,6 +21,7 @@ export interface Annotation {
   color: string;
   timestamp: number;
   rect?: { x: number; y: number; width: number; height: number }; // For highlights/shapes
+  path?: Point[]; // For freehand drawing
 }
 
 export interface Book {

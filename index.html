@@ -4,7 +4,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Aura Library - AI Ebook Suite</title>
+    <title>Kskar Library - AI Ebook Suite</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,700;1,700&display=swap" rel="stylesheet">
     <!-- PDF.js Text Layer Styles - Version matched with import map -->
@@ -31,9 +31,9 @@
       ::-webkit-scrollbar-thumb:hover {
         background: #cbd5e1;
       }
-      /* Custom styles for the text layer to ensure it aligns with our scaled canvas */
+      /* Custom styles for the text layer */
       .textLayer {
-        opacity: 0.2; /* Make it visible for debugging selection if needed, but normally transparent */
+        opacity: 0.2;
         mix-blend-mode: multiply;
       }
       .textLayer > span {
@@ -45,6 +45,13 @@
       }
       ::selection {
         background: rgba(99, 102, 241, 0.3);
+      }
+      /* Disable text selection when drawing */
+      .drawing-active .textLayer {
+        pointer-events: none !important;
+      }
+      .drawing-active {
+        cursor: crosshair !important;
       }
     </style>
   <script type="importmap">
